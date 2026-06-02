@@ -28,7 +28,7 @@ export default function handler(req, res) {
     .digest('hex')
     .toUpperCase();
 
-  // Enveloppe SOAP corrigée avec WSI3_GetExpeditions
+  // Enveloppe SOAP
   const soap = `<?xml version="1.0" encoding="utf-8"?>
 <soap:Envelope xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xmlns:xsd="http://www.w3.org/2001/XMLSchema" xmlns:soap="http://schemas.xmlsoap.org/soap/envelope/">
   <soap:Body>
@@ -46,8 +46,11 @@ export default function handler(req, res) {
     path: '/webservice/Web_Services.asmx',
     method: 'POST',
     headers: {
+      'Host': 'www.mondialrelay.fr',
       'Content-Type': 'text/xml; charset=utf-8',
-      'SOAPAction': 'http://www.mondialrelay.fr/webservice/WSI3_GetExpeditions',
+      // CRUCIAL : Les guillemets doubles doivent être envoyés AU SERVEUR. 
+      // On utilise \"...\" pour qu'ils fassent partie intégrante de la valeur reçue par Mondial Relay.
+      'SOAPAction': '"http://www.mondialrelay.fr/webservice/WSI3_GetExpeditions"',
       'Content-Length': Buffer.byteLength(soap)
     }
   };
@@ -57,16 +60,13 @@ export default function handler(req, res) {
     response.on('data', chunk => data += chunk);
     response.on('end', () => {
       
-      // Fonction de secours pour extraire les balises XML simplement
       function extract(xml, tag) {
         const m = xml.match(new RegExp(`<${tag}[^>]*>([^<]+)<\/${tag}>`, 'i'));
         return m ? m[1].trim() : '';
       }
 
-      // Extraction des événements (Historique)
       function extractEvents(xml) {
         const events = [];
-        // Mondial Relay renvoie une liste de balises <View_AnomalieEvenement🚚>
         const blocks = xml.match(/<View_AnomalieEvenement>[\s\S]*?<\/View_AnomalieEvenement>/gi) || [];
         
         blocks.forEach(block => {
@@ -78,16 +78,15 @@ export default function handler(req, res) {
               date: date, 
               heure: heure, 
               libelle: libelle, 
-              lieu: '' // WSI3 centralise souvent le lieu directement dans le libellé ou l'étape
+              lieu: '' 
             });
           }
         });
         return events;
       }
 
-      // Logique pour faire avancer ta barre de progression Shopify (de 0 à 4)
       function getStep(evenements, statCode) {
-        if (statCode === '80' || statCode === '81' || statCode === '82') return 4; // Livré
+        if (statCode === '80' || statCode === '81' || statCode === '82') return 4;
         if (!evenements || evenements.length === 0) return 0;
         
         const dernier = evenements[0]?.libelle?.toLowerCase() || '';
@@ -102,8 +101,6 @@ export default function handler(req, res) {
       }
 
       const statCode = extract(data, 'STAT');
-      // Les codes d'erreur MR valides pour un colis existant mais en cours sont 0, ou les codes de livraison 80, 81, 82.
-      // Si le code est différent et n'est pas une réussite, c'est une erreur.
       const codesValides = ['0', '80', '81', '82', '83'];
       if (statCode && !codesValides.includes(statCode)) {
         return res.status(200).json({ error: true, message: 'Colis introuvable ou numéro incorrect.', code: statCode });
@@ -111,7 +108,6 @@ export default function handler(req, res) {
 
       const evenements = extractEvents(data);
       
-      // On récupère le libellé du dernier événement ou le statut général
       let statut = 'En cours de traitement';
       if (evenements.length > 0) {
         statut = evenements[0].libelle;
@@ -119,7 +115,6 @@ export default function handler(req, res) {
         statut = 'Colis livré';
       }
 
-      // Renvoi propre des données vers ton JS Shopify
       res.status(200).json({
         numero,
         statut,
