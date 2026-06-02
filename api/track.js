@@ -13,8 +13,8 @@ export default function handler(req, res) {
   const CODE = process.env.MR_CODE_ENSEIGNE;
   const CLE = process.env.MR_CLE_API;
 
-  // Formule hash exacte Mondial Relay
-  const hashInput = `${CODE}${numero}FR${CLE}`;
+  // Hash correct Mondial Relay — ordre exact des paramètres
+  const hashInput = CODE + numero + 'FR' + CLE;
   const hash = crypto.createHash('md5')
     .update(hashInput)
     .digest('hex')
@@ -40,7 +40,7 @@ export default function handler(req, res) {
     method: 'POST',
     headers: {
       'Content-Type': 'text/xml; charset=utf-8',
-      'SOAPAction': '"http://www.mondialrelay.fr/webservice/WSI2_GetExpeditionsByExpeditions"',
+      'SOAPAction': 'http://www.mondialrelay.fr/webservice/WSI2_GetExpeditionsByExpeditions',
       'Content-Length': Buffer.byteLength(soap)
     }
   };
@@ -50,18 +50,11 @@ export default function handler(req, res) {
     response.on('data', chunk => data += chunk);
     response.on('end', () => {
 
-      console.log('RAW RESPONSE:', data);
+      console.log('RAW:', data);
 
       function extract(xml, tag) {
-        const patterns = [
-          new RegExp(`<${tag}>([^<]*)<\/${tag}>`, 'i'),
-          new RegExp(`<${tag} [^>]*>([^<]*)<\/${tag}>`, 'i'),
-        ];
-        for (const p of patterns) {
-          const m = xml.match(p);
-          if (m && m[1].trim()) return m[1].trim();
-        }
-        return '';
+        const m = xml.match(new RegExp(`<${tag}[^>]*>([^<]+)<\/${tag}>`, 'i'));
+        return m ? m[1].trim() : '';
       }
 
       function extractEvents(xml) {
@@ -74,30 +67,43 @@ export default function handler(req, res) {
           const lieu = extract(block, 'Lieu');
           if (libelle) events.push({ date, heure, libelle, lieu });
         });
-        return events.slice(0, 8);
+        return events;
       }
 
-      function getStep(evenements, code) {
+      function getStep(evenements) {
         if (!evenements || evenements.length === 0) return 1;
-        const dernierEvent = evenements[0]?.libelle?.toLowerCase() || '';
-        if (dernierEvent.includes('livr') || dernierEvent.includes('remis')) return 4;
-        if (dernierEvent.includes('relais') || dernierEvent.includes('point')) return 3;
-        if (dernierEvent.includes('transit') || dernierEvent.includes('cours') || dernierEvent.includes('charg')) return 2;
+        const dernier = evenements[0]?.libelle?.toLowerCase() || '';
+        if (dernier.includes('livr') || dernier.includes('remis') || dernier.includes('distribu')) return 4;
+        if (dernier.includes('relais') || dernier.includes('point') || dernier.includes('disponible')) return 3;
+        if (dernier.includes('transit') || dernier.includes('cours') || dernier.includes('tri')) return 2;
         return 1;
       }
 
-      // Vérifier si erreur
+      // Vérifier erreur SOAP
+      if (data.includes('soap:Fault') || data.includes('faultstring')) {
+        const fault = extract(data, 'faultstring');
+        return res.status(200).json({
+          error: true,
+          message: fault || 'Erreur API Mondial Relay',
+          fullResponse: data
+        });
+      }
+
+      // Vérifier code erreur MR
       const statCode = extract(data, 'STAT');
       if (statCode && statCode !== '0') {
         return res.status(200).json({
           error: true,
-          message: 'Colis introuvable — code: ' + statCode,
-          raw: data.substring(0, 300)
+          message: 'Colis introuvable',
+          code: statCode,
+          fullResponse: data
         });
       }
 
       const evenements = extractEvents(data);
-      const statut = evenements.length > 0 ? evenements[0].libelle : (extract(data, 'Libelle') || 'En cours');
+      const statut = evenements.length > 0
+        ? evenements[0].libelle
+        : extract(data, 'Libelle') || 'En cours';
 
       res.status(200).json({
         numero,
