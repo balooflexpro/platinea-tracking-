@@ -8,13 +8,15 @@ export default function handler(req, res) {
   if (req.method === 'OPTIONS') return res.status(200).end();
 
   const numero = req.query.numero;
+  const codePostal = req.query.cp || '';
+
   if (!numero) return res.status(400).json({ error: 'Numéro manquant' });
 
   const CODE = process.env.MR_CODE_ENSEIGNE;
   const CLE = process.env.MR_CLE_API;
 
-  // Hash correct Mondial Relay — ordre exact des paramètres
-  const hashInput = CODE + numero + 'FR' + CLE;
+  // Hash avec code postal
+  const hashInput = CODE + numero + 'FR' + codePostal + CLE;
   const hash = crypto.createHash('md5')
     .update(hashInput)
     .digest('hex')
@@ -29,6 +31,7 @@ export default function handler(req, res) {
       <Enseigne>${CODE}</Enseigne>
       <Expeditions>${numero}</Expeditions>
       <Language>FR</Language>
+      <CodePostal>${codePostal}</CodePostal>
       <Security>${hash}</Security>
     </WSI2_GetExpeditionsByExpeditions>
   </soap:Body>
@@ -49,7 +52,6 @@ export default function handler(req, res) {
     let data = '';
     response.on('data', chunk => data += chunk);
     response.on('end', () => {
-
       console.log('RAW:', data);
 
       function extract(xml, tag) {
@@ -79,31 +81,17 @@ export default function handler(req, res) {
         return 1;
       }
 
-      // Vérifier erreur SOAP
-      if (data.includes('soap:Fault') || data.includes('faultstring')) {
-        const fault = extract(data, 'faultstring');
-        return res.status(200).json({
-          error: true,
-          message: fault || 'Erreur API Mondial Relay',
-          fullResponse: data
-        });
+      if (data.includes('soap:Fault')) {
+        return res.status(200).json({ error: true, message: extract(data, 'faultstring'), fullResponse: data });
       }
 
-      // Vérifier code erreur MR
       const statCode = extract(data, 'STAT');
       if (statCode && statCode !== '0') {
-        return res.status(200).json({
-          error: true,
-          message: 'Colis introuvable',
-          code: statCode,
-          fullResponse: data
-        });
+        return res.status(200).json({ error: true, message: 'Colis introuvable', code: statCode, fullResponse: data });
       }
 
       const evenements = extractEvents(data);
-      const statut = evenements.length > 0
-        ? evenements[0].libelle
-        : extract(data, 'Libelle') || 'En cours';
+      const statut = evenements.length > 0 ? evenements[0].libelle : extract(data, 'Libelle') || 'En cours';
 
       res.status(200).json({
         numero,
