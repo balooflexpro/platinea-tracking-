@@ -38,12 +38,12 @@ export default function handler(req, res) {
 </soap:Envelope>`;
 
   const options = {
-    hostname: 'api.mondialrelay.com',
-    path: '/Web_Services.asmx',
+    hostname: 'www.mondialrelay.fr',
+path: '/webservice/Web_Services.asmx',
     method: 'POST',
     headers: {
       'Content-Type': 'text/xml; charset=utf-8',
-      'SOAPAction': 'http://www.mondialrelay.fr/webservice/WSI2_GetExpeditionsByExpeditions',
+      'SOAPAction': '"http://www.mondialrelay.fr/webservice/WSI2_GetExpeditionsByExpeditions"',
       'Content-Length': Buffer.byteLength(soap)
     }
   };
