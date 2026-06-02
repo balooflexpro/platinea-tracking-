@@ -3,7 +3,9 @@ const crypto = require('crypto');
 
 export default function handler(req, res) {
   res.setHeader('Access-Control-Allow-Origin', '*');
-  res.setHeader('Access-Control-Allow-Methods', 'GET');
+  res.setHeader('Access-Control-Allow-Methods', 'GET, OPTIONS');
+
+  if (req.method === 'OPTIONS') return res.status(200).end();
 
   const numero = req.query.numero;
   if (!numero) return res.status(400).json({ error: 'Numéro manquant' });
@@ -11,12 +13,17 @@ export default function handler(req, res) {
   const CODE = process.env.MR_CODE_ENSEIGNE;
   const CLE = process.env.MR_CLE_API;
 
+  // Formule exacte Mondial Relay pour WSI2_GetExpeditionsByExpeditions
+  const hashInput = CODE + numero + 'FR' + '' + CLE;
   const hash = crypto.createHash('md5')
-    .update(CODE + numero + 'FR' + CLE)
-    .digest('hex').toUpperCase();
+    .update(hashInput)
+    .digest('hex')
+    .toUpperCase();
 
   const soap = `<?xml version="1.0" encoding="utf-8"?>
-<soap:Envelope xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xmlns:xsd="http://www.w3.org/2001/XMLSchema" xmlns:soap="http://schemas.xmlsoap.org/soap/envelope/">
+<soap:Envelope xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+               xmlns:xsd="http://www.w3.org/2001/XMLSchema"
+               xmlns:soap="http://schemas.xmlsoap.org/soap/envelope/">
   <soap:Body>
     <WSI2_GetExpeditionsByExpeditions xmlns="http://www.mondialrelay.fr/webservice/">
       <Enseigne>${CODE}</Enseigne>
@@ -33,7 +40,7 @@ export default function handler(req, res) {
     method: 'POST',
     headers: {
       'Content-Type': 'text/xml; charset=utf-8',
-      'SOAPAction': 'http://www.mondialrelay.fr/webservice/WSI2_GetExpeditionsByExpeditions',
+      'SOAPAction': '"http://www.mondialrelay.fr/webservice/WSI2_GetExpeditionsByExpeditions"',
       'Content-Length': Buffer.byteLength(soap)
     }
   };
@@ -42,53 +49,64 @@ export default function handler(req, res) {
     let data = '';
     response.on('data', chunk => data += chunk);
     response.on('end', () => {
-      function extract(tag) {
-        const m = data.match(new RegExp(`<${tag}[^>]*>([^<]*)</${tag}>`, 'i'));
+
+      // Log pour debug
+      console.log('MR Response:', data.substring(0, 500));
+
+      function extract(xml, tag) {
+        const m = xml.match(new RegExp(`<${tag}[^>]*>([^<]*)<\/${tag}>`, 'i'));
         return m ? m[1].trim() : '';
       }
 
-      function extractEvents(xml) {
+      function extractAllEvents(xml) {
         const events = [];
-        const matches = xml.match(/<Evenement>[\s\S]*?<\/Evenement>/gi) || [];
-        matches.slice(0, 6).forEach(block => {
-          const date = extract('Date') || '';
-          const heure = extract('Heure') || '';
-          const libelle = extract('Libelle') || '';
-          const lieu = extract('Lieu') || '';
+        const regex = /<Evenement>([\s\S]*?)<\/Evenement>/gi;
+        let match;
+        while ((match = regex.exec(xml)) !== null) {
+          const block = match[1];
+          const date = extract(block, 'Date');
+          const heure = extract(block, 'Heure');
+          const libelle = extract(block, 'Libelle');
+          const lieu = extract(block, 'Lieu');
           if (libelle) events.push({ date, heure, libelle, lieu });
-        });
-        return events;
+        }
+        return events.slice(0, 6);
       }
 
-      function getStep(code) {
-        const n = parseInt(code) || 0;
-        if (n === 0) return 0;
-        if (n < 30) return 1;
-        if (n < 60) return 2;
-        if (n < 80) return 3;
-        return 4;
+      function getStep(statut) {
+        const s = statut.toLowerCase();
+        if (s.includes('livr') || s.includes('remis')) return 4;
+        if (s.includes('relais') || s.includes('point')) return 3;
+        if (s.includes('transit') || s.includes('cours')) return 2;
+        if (s.includes('pris') || s.includes('charg') || s.includes('enregistr')) return 1;
+        return 0;
       }
 
-      const statut = extract('Libelle') || extract('StatutLibelle') || 'Inconnu';
-      const code = extract('STAT') || extract('Statut') || '0';
+      const statut = extract(data, 'Libelle') || extract(data, 'StatutLibelle') || 'En cours';
+      const code = extract(data, 'STAT') || '0';
+      const evenements = extractAllEvents(data);
 
       res.status(200).json({
         numero,
         statut,
         code,
-        step: getStep(code),
-        destinataire: extract('Destinataire'),
-        poids: extract('Poids'),
-        pointRelais: extract('PointRelais'),
-        dateLivraison: extract('DateLivraison'),
-        dateCreation: extract('DateCreation'),
-        evenements: extractEvents(data),
-        raw: data.length > 0
+        step: getStep(statut),
+        destinataire: extract(data, 'Destinataire'),
+        poids: extract(data, 'Poids'),
+        pointRelais: extract(data, 'PointRelais'),
+        dateLivraison: extract(data, 'DateLivraison'),
+        dateCreation: extract(data, 'DateCreation'),
+        evenements,
+        raw: data.length > 100,
+        debug: data.substring(0, 200)
       });
     });
   });
 
-  request.on('error', e => res.status(500).json({ error: e.message }));
+  request.on('error', e => {
+    res.status(500).json({ error: e.message });
+  });
+
   request.write(soap);
   request.end();
 }
