@@ -1,5 +1,5 @@
-import https from 'https';
-import crypto from 'crypto';
+const https = require('https');
+const crypto = require('crypto');
 
 export default function handler(req, res) {
   res.setHeader('Access-Control-Allow-Origin', '*');
@@ -13,8 +13,8 @@ export default function handler(req, res) {
   const CODE = process.env.MR_CODE_ENSEIGNE;
   const CLE = process.env.MR_CLE_API;
 
-  // Hash correct Mondial Relay — ordre exact des paramètres
-  const hashInput = CODE + numero + 'FR' + CLE;
+  // Formule exacte Mondial Relay pour WSI2_GetExpeditionsByExpeditions
+  const hashInput = CODE + numero + 'FR' + '' + CLE;
   const hash = crypto.createHash('md5')
     .update(hashInput)
     .digest('hex')
@@ -40,7 +40,7 @@ export default function handler(req, res) {
     method: 'POST',
     headers: {
       'Content-Type': 'text/xml; charset=utf-8',
-      'SOAPAction': 'http://www.mondialrelay.fr/webservice/WSI2_GetExpeditionsByExpeditions',
+      'SOAPAction': '"http://www.mondialrelay.fr/webservice/WSI2_GetExpeditionsByExpeditions"',
       'Content-Length': Buffer.byteLength(soap)
     }
   };
@@ -50,65 +50,47 @@ export default function handler(req, res) {
     response.on('data', chunk => data += chunk);
     response.on('end', () => {
 
-      console.log('RAW:', data);
+      // Log pour debug
+      console.log('MR Response:', data.substring(0, 500));
 
       function extract(xml, tag) {
-        const m = xml.match(new RegExp(`<${tag}[^>]*>([^<]+)<\/${tag}>`, 'i'));
+        const m = xml.match(new RegExp(`<${tag}[^>]*>([^<]*)<\/${tag}>`, 'i'));
         return m ? m[1].trim() : '';
       }
 
-      function extractEvents(xml) {
+      function extractAllEvents(xml) {
         const events = [];
-        const blocks = xml.match(/<Evenement>[\s\S]*?<\/Evenement>/gi) || [];
-        blocks.forEach(block => {
+        const regex = /<Evenement>([\s\S]*?)<\/Evenement>/gi;
+        let match;
+        while ((match = regex.exec(xml)) !== null) {
+          const block = match[1];
           const date = extract(block, 'Date');
           const heure = extract(block, 'Heure');
           const libelle = extract(block, 'Libelle');
           const lieu = extract(block, 'Lieu');
           if (libelle) events.push({ date, heure, libelle, lieu });
-        });
-        return events;
+        }
+        return events.slice(0, 6);
       }
 
-      function getStep(evenements) {
-        if (!evenements || evenements.length === 0) return 1;
-        const dernier = evenements[0]?.libelle?.toLowerCase() || '';
-        if (dernier.includes('livr') || dernier.includes('remis') || dernier.includes('distribu')) return 4;
-        if (dernier.includes('relais') || dernier.includes('point') || dernier.includes('disponible')) return 3;
-        if (dernier.includes('transit') || dernier.includes('cours') || dernier.includes('tri')) return 2;
-        return 1;
+      function getStep(statut) {
+        const s = statut.toLowerCase();
+        if (s.includes('livr') || s.includes('remis')) return 4;
+        if (s.includes('relais') || s.includes('point')) return 3;
+        if (s.includes('transit') || s.includes('cours')) return 2;
+        if (s.includes('pris') || s.includes('charg') || s.includes('enregistr')) return 1;
+        return 0;
       }
 
-      // Vérifier erreur SOAP
-      if (data.includes('soap:Fault') || data.includes('faultstring')) {
-        const fault = extract(data, 'faultstring');
-        return res.status(200).json({
-          error: true,
-          message: fault || 'Erreur API Mondial Relay',
-          fullResponse: data
-        });
-      }
-
-      // Vérifier code erreur MR
-      const statCode = extract(data, 'STAT');
-      if (statCode && statCode !== '0') {
-        return res.status(200).json({
-          error: true,
-          message: 'Colis introuvable',
-          code: statCode,
-          fullResponse: data
-        });
-      }
-
-      const evenements = extractEvents(data);
-      const statut = evenements.length > 0
-        ? evenements[0].libelle
-        : extract(data, 'Libelle') || 'En cours';
+      const statut = extract(data, 'Libelle') || extract(data, 'StatutLibelle') || 'En cours';
+      const code = extract(data, 'STAT') || '0';
+      const evenements = extractAllEvents(data);
 
       res.status(200).json({
         numero,
         statut,
-        step: getStep(evenements),
+        code,
+        step: getStep(statut),
         destinataire: extract(data, 'Destinataire'),
         poids: extract(data, 'Poids'),
         pointRelais: extract(data, 'PointRelais'),
@@ -116,12 +98,15 @@ export default function handler(req, res) {
         dateCreation: extract(data, 'DateCreation'),
         evenements,
         raw: data.length > 100,
-        fullResponse: data
+        debug: data.substring(0, 200)
       });
     });
   });
 
-  request.on('error', e => res.status(500).json({ error: e.message }));
+  request.on('error', e => {
+    res.status(500).json({ error: e.message });
+  });
+
   request.write(soap);
   request.end();
 }
