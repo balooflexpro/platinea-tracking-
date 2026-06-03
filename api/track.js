@@ -36,7 +36,7 @@ export default function handler(req, res) {
 
   const options = {
     hostname: 'api.mondialrelay.com',
-    path: '/Web_Services.asmx',
+    path: '/WebService.asmx',
     method: 'POST',
     headers: {
       'Content-Type': 'text/xml; charset=utf-8',
