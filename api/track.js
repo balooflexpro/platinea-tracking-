@@ -1,5 +1,5 @@
-const https = require('https');
-const crypto = require('crypto');
+import https from 'https';
+import crypto from 'crypto';
 
 export default function handler(req, res) {
   res.setHeader('Access-Control-Allow-Origin', '*');
@@ -13,17 +13,15 @@ export default function handler(req, res) {
   const CODE = process.env.MR_CODE_ENSEIGNE;
   const CLE = process.env.MR_CLE_API;
 
-  // Formule exacte Mondial Relay pour WSI2_GetExpeditionsByExpeditions
-  const hashInput = CODE + numero + 'FR' + '' + CLE;
+  // Hash MD5 exact Mondial Relay
+  const hashInput = CODE + numero + 'FR' + CLE;
   const hash = crypto.createHash('md5')
     .update(hashInput)
     .digest('hex')
     .toUpperCase();
 
   const soap = `<?xml version="1.0" encoding="utf-8"?>
-<soap:Envelope xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
-               xmlns:xsd="http://www.w3.org/2001/XMLSchema"
-               xmlns:soap="http://schemas.xmlsoap.org/soap/envelope/">
+<soap:Envelope xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xmlns:xsd="http://www.w3.org/2001/XMLSchema" xmlns:soap="http://schemas.xmlsoap.org/soap/envelope/">
   <soap:Body>
     <WSI2_GetExpeditionsByExpeditions xmlns="http://www.mondialrelay.fr/webservice/">
       <Enseigne>${CODE}</Enseigne>
@@ -34,6 +32,8 @@ export default function handler(req, res) {
   </soap:Body>
 </soap:Envelope>`;
 
+  const soapBuffer = Buffer.from(soap, 'utf-8');
+
   const options = {
     hostname: 'api.mondialrelay.com',
     path: '/Web_Services.asmx',
@@ -41,7 +41,7 @@ export default function handler(req, res) {
     headers: {
       'Content-Type': 'text/xml; charset=utf-8',
       'SOAPAction': '"http://www.mondialrelay.fr/webservice/WSI2_GetExpeditionsByExpeditions"',
-      'Content-Length': Buffer.byteLength(soap)
+      'Content-Length': soapBuffer.length
     }
   };
 
@@ -50,63 +50,66 @@ export default function handler(req, res) {
     response.on('data', chunk => data += chunk);
     response.on('end', () => {
 
-      // Log pour debug
-      console.log('MR Response:', data.substring(0, 500));
+      console.log('STATUS:', response.statusCode);
+      console.log('RAW:', data.substring(0, 800));
 
       function extract(xml, tag) {
-        const m = xml.match(new RegExp(`<${tag}[^>]*>([^<]*)<\/${tag}>`, 'i'));
+        const m = xml.match(new RegExp(`<${tag}(?:\\s[^>]*)?>([\\s\\S]*?)<\\/${tag}>`, 'i'));
         return m ? m[1].trim() : '';
       }
 
-      function extractAllEvents(xml) {
+      function extractEvents(xml) {
         const events = [];
-        const regex = /<Evenement>([\s\S]*?)<\/Evenement>/gi;
-        let match;
-        while ((match = regex.exec(xml)) !== null) {
-          const block = match[1];
+        const blocks = xml.match(/<Evenement>[\s\S]*?<\/Evenement>/gi) || [];
+        blocks.forEach(block => {
           const date = extract(block, 'Date');
           const heure = extract(block, 'Heure');
           const libelle = extract(block, 'Libelle');
           const lieu = extract(block, 'Lieu');
           if (libelle) events.push({ date, heure, libelle, lieu });
-        }
-        return events.slice(0, 6);
+        });
+        return events;
       }
 
-      function getStep(statut) {
-        const s = statut.toLowerCase();
-        if (s.includes('livr') || s.includes('remis')) return 4;
-        if (s.includes('relais') || s.includes('point')) return 3;
-        if (s.includes('transit') || s.includes('cours')) return 2;
-        if (s.includes('pris') || s.includes('charg') || s.includes('enregistr')) return 1;
-        return 0;
+      function getStep(evenements, statut) {
+        const s = (evenements.length > 0 ? evenements[0].libelle : statut).toLowerCase();
+        if (s.includes('livr') || s.includes('remis') || s.includes('distribu')) return 4;
+        if (s.includes('relais') || s.includes('point') || s.includes('disponible')) return 3;
+        if (s.includes('transit') || s.includes('cours') || s.includes('tri') || s.includes('charg')) return 2;
+        if (s.includes('enregistr') || s.includes('pris') || s.includes('cr')) return 1;
+        return 1;
       }
 
-      const statut = extract(data, 'Libelle') || extract(data, 'StatutLibelle') || 'En cours';
-      const code = extract(data, 'STAT') || '0';
-      const evenements = extractAllEvents(data);
+      // Erreur SOAP
+      if (data.includes('soap:Fault') || data.includes('faultstring')) {
+        const fault = extract(data, 'faultstring');
+        return res.status(200).json({
+          error: true,
+          message: fault || 'Erreur serveur Mondial Relay',
+          fullResponse: data
+        });
+      }
 
-      res.status(200).json({
+      // Code erreur MR
+      const statCode = extract(data, 'STAT');
+      if (statCode && statCode !== '0') {
+        return res.status(200).json({
+          error: true,
+          message: 'Colis introuvable (code ' + statCode + ')',
+          fullResponse: data
+        });
+      }
+
+      const evenements = extractEvents(data);
+      const statut = evenements.length > 0
+        ? evenements[0].libelle
+        : extract(data, 'Libelle') || 'En cours de traitement';
+
+      const destinataire = extract(data, 'Destinataire');
+      const poids = extract(data, 'Poids');
+      const pointRelais = extract(data, 'PointRelais') || extract(data, 'LieuLivraison');
+      const dateLivraison = extract(data, 'DateLivraison') || extract(data, 'DateEstimee');
+      const dateCreation = extract(data, 'DateCreation') || extract(data, 'DateExpedition');
+
+      return res.status(200).json({
         numero,
-        statut,
-        code,
-        step: getStep(statut),
-        destinataire: extract(data, 'Destinataire'),
-        poids: extract(data, 'Poids'),
-        pointRelais: extract(data, 'PointRelais'),
-        dateLivraison: extract(data, 'DateLivraison'),
-        dateCreation: extract(data, 'DateCreation'),
-        evenements,
-        raw: data.length > 100,
-        debug: data.substring(0, 200)
-      });
-    });
-  });
-
-  request.on('error', e => {
-    res.status(500).json({ error: e.message });
-  });
-
-  request.write(soap);
-  request.end();
-}
